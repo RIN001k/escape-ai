@@ -17,21 +17,19 @@ function buildPrompt(req: GenerateRequest): string {
 
 === USER REQUEST (FOLLOW EXACTLY) ===
 - Destination the traveler wants to visit: "${city}"
-- Trip length: ${req.days} days
+- Check-in: ${req.check_in} | Check-out: ${req.check_out} (${req.days} nights)
+- Guests: ${req.guests} adult(s)
 - Max hotel budget: $${req.accommodation_budget}/night
 - Total activity budget: $${req.activity_budget}
 
-CRITICAL: All 3 trip options MUST take place in "${city}". Do NOT suggest any other city. Every trip's "city" = "${city}", "destination" = "${city}, <country>".
+CRITICAL: All 3 trip options MUST take place in "${city}". Do NOT suggest any other city.
 
-The 3 options must differ in:
-- VIBE (each a different one from: Romantic, Adventure, Cultural, Wellness, Foodie)
-- NEIGHBORHOOD / DISTRICT of ${city}
-- The activities and hotel chosen
+The 3 options must differ in VIBE, NEIGHBORHOOD, hotel choice, and activities.
 
-Return a valid JSON array of 3 trip objects. Strict schema:
+Return a valid JSON array of 3 trip objects:
 {
   id: string,
-  title: string,                     // max 6 words
+  title: string,
   destination: string,               // "${city}, <country>"
   city: string,                      // "${city}"
   country: string,
@@ -42,7 +40,7 @@ Return a valid JSON array of 3 trip objects. Strict schema:
   ],
   hotel: {
     name: string,
-    rating: number,                  // 1-5
+    rating: number,
     price_per_night: number,         // <= ${req.accommodation_budget}
     currency: "USD",
     booking_query: string,
@@ -51,10 +49,7 @@ Return a valid JSON array of 3 trip objects. Strict schema:
   estimated_total: number
 }
 
-Rules:
-- Every trip is IN ${city}.
-- Hotel price_per_night MUST be <= ${req.accommodation_budget}.
-- Return ONLY the raw JSON array. No markdown.`;
+Rules: every trip is IN ${city}. Hotel price_per_night <= ${req.accommodation_budget}. Return ONLY raw JSON.`;
 }
 
 export async function POST(request: NextRequest) {
@@ -62,16 +57,36 @@ export async function POST(request: NextRequest) {
     const body: GenerateRequest = await request.json();
 
     if (!body.city?.trim()) {
-      return NextResponse.json({ error: "Starting city is required." }, { status: 400 });
+      return NextResponse.json({ error: "Destination city is required." }, { status: 400 });
     }
-    if (body.days < 2 || body.days > 5) {
-      return NextResponse.json({ error: "Days must be between 2 and 5." }, { status: 400 });
+    if (!body.check_in || !body.check_out) {
+      return NextResponse.json({ error: "Check-in and check-out dates are required." }, { status: 400 });
     }
 
-    console.log("[/api/generate] received:", body);
+    // Compute nights from dates
+    const msPerDay = 86_400_000;
+    const nights = Math.round(
+      (new Date(body.check_out).getTime() - new Date(body.check_in).getTime()) / msPerDay
+    );
+    if (nights < 1 || nights > 14) {
+      return NextResponse.json({ error: "Trip must be between 1 and 14 nights." }, { status: 400 });
+    }
 
-    // 1. Ask Gemini for 3 trip options
-    const text = await generateJSON(buildPrompt(body));
+    const enrichedBody: GenerateRequest = { ...body, days: nights };
+
+    console.log("[/api/generate] received:", {
+      city: body.city,
+      check_in: body.check_in,
+      check_out: body.check_out,
+      nights,
+      guests: body.guests,
+      accommodation_budget: body.accommodation_budget,
+      activity_budget: body.activity_budget,
+      departure_city: body.departure_city,
+    });
+
+    // 1. Gemini: generate 3 trip options
+    const text = await generateJSON(buildPrompt(enrichedBody));
     let trips: Trip[];
     try {
       trips = JSON.parse(text);
@@ -83,7 +98,11 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "AI returned an unexpected response." }, { status: 500 });
     }
 
-    // 2. Group trips by city for batched hotel + image fetching.
+    // 2. Group trips by city for batched hotel + image fetching
+    const hasRapidKey = Boolean(process.env.RAPIDAPI_KEY);
+    const hotelsByCity = new Map<string, Hotel[]>();
+    const heroByTripIdx = new Map<number, string>();
+
     const citiesInOrder: string[] = [];
     const cityToTripIdx = new Map<string, number[]>();
     trips.forEach((t, idx) => {
@@ -95,13 +114,6 @@ export async function POST(request: NextRequest) {
       cityToTripIdx.get(key)!.push(idx);
     });
 
-    // 3. For each unique city, fetch BOTH:
-    //    - real hotels from Booking (optional, requires RapidAPI key)
-    //    - a pool of photos from Wikimedia Commons (always, free)
-    const hasRapidKey = Boolean(process.env.RAPIDAPI_KEY);
-    const hotelsByCity = new Map<string, Hotel[]>();
-    const heroByTripIdx = new Map<number, string>();
-
     await Promise.all(
       citiesInOrder.map(async (city) => {
         const key = city.toLowerCase();
@@ -111,7 +123,9 @@ export async function POST(request: NextRequest) {
         const [hotels, commonsPool] = await Promise.all([
           hasRapidKey
             ? getRealHotels(city, {
-                days: body.days,
+                arrival_date: body.check_in,
+                departure_date: body.check_out,
+                adults: body.guests ?? 2,
                 maxPrice: body.accommodation_budget,
                 count,
               })
@@ -121,7 +135,6 @@ export async function POST(request: NextRequest) {
 
         hotelsByCity.set(key, hotels);
 
-        // Pick N distinct images for this city and assign one to each trip.
         const picks = pickDistinct(commonsPool, count);
         tripIndices.forEach((tripIdx, i) => {
           if (picks[i]) heroByTripIdx.set(tripIdx, picks[i]);
@@ -129,29 +142,21 @@ export async function POST(request: NextRequest) {
       })
     );
 
-    // 4. Shared city summary photo as a last-resort fallback.
+    // 3. Shared city fallback photo
     const cityFallback = await getCityImage(trips[0].city, trips[0].country);
 
-    // 5. Merge everything into the final trip objects.
-    //    IMPORTANT: hero image is ALWAYS a city photo (Commons / Wikipedia).
-    //    Real hotel photos are preserved on `hotel.image_url` but NEVER used as hero.
+    // 4. Merge: hero = city photo (never hotel room), hotel = live data from Booking
     const enriched: Trip[] = trips.map((trip, i) => {
       const pool = hotelsByCity.get(trip.city.toLowerCase()) ?? [];
       const realHotel = pool.shift();
 
       const mergedHotel = realHotel
-        ? {
-            ...trip.hotel,
-            ...realHotel,
-            amenities: realHotel.amenities ?? trip.hotel.amenities,
-          }
+        ? { ...trip.hotel, ...realHotel, amenities: realHotel.amenities ?? trip.hotel.amenities }
         : { ...trip.hotel, source: "ai" as const };
-
-      const hero = heroByTripIdx.get(i) ?? cityFallback ?? undefined;
 
       return {
         ...trip,
-        image_url: hero,
+        image_url: heroByTripIdx.get(i) ?? cityFallback ?? undefined,
         city_image_url: cityFallback ?? undefined,
         hotel: mergedHotel,
       };

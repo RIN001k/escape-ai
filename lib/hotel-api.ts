@@ -12,18 +12,6 @@ function buildHeaders(): HeadersInit {
   };
 }
 
-/** Next Friday -> Friday + days. Gives us a realistic weekend window. */
-function nextWeekendRange(days: number): { arrival: string; departure: string } {
-  const now = new Date();
-  const daysUntilFri = ((5 - now.getDay() + 7) % 7) || 7;
-  const arrival = new Date(now);
-  arrival.setDate(now.getDate() + daysUntilFri);
-  const departure = new Date(arrival);
-  departure.setDate(arrival.getDate() + Math.max(1, days));
-  const iso = (d: Date) => d.toISOString().slice(0, 10);
-  return { arrival: iso(arrival), departure: iso(departure) };
-}
-
 interface RawDestination {
   dest_id?: string | number;
   search_type?: string;
@@ -35,16 +23,17 @@ async function searchDestination(city: string): Promise<RawDestination | null> {
   const url = `${BASE}/hotels/searchDestination?query=${encodeURIComponent(city)}`;
   const res = await fetch(url, {
     headers: buildHeaders(),
-    next: { revalidate: 86400 }, // destinations rarely change
+    next: { revalidate: 86400 },
   });
   if (!res.ok) {
     console.warn(`[hotel-api] searchDestination failed for "${city}": ${res.status}`);
     return null;
   }
   const json = (await res.json()) as { data?: RawDestination[] };
-  // Prefer CITY-type results over landmarks/regions
   const results = json.data ?? [];
-  const city_match = results.find((r) => r.search_type === "city" || r.search_type === "CITY");
+  const city_match = results.find(
+    (r) => r.search_type === "city" || r.search_type === "CITY"
+  );
   return city_match ?? results[0] ?? null;
 }
 
@@ -57,29 +46,24 @@ interface RawProperty {
   reviewScore?: number;
   priceBreakdown?: RawPriceBreakdown;
   photoUrls?: string[];
-  wishlistName?: string;
   countryCode?: string;
-  ufi?: number;
 }
 
 interface RawHotel {
   hotel_id?: number | string;
   property?: RawProperty;
-  accessibilityLabel?: string;
 }
 
 async function searchHotels(
   dest: RawDestination,
-  days: number,
-  maxPrice?: number
+  opts: { arrival_date: string; departure_date: string; maxPrice?: number; adults: number }
 ): Promise<RawHotel[]> {
-  const { arrival, departure } = nextWeekendRange(days);
   const params = new URLSearchParams({
     dest_id: String(dest.dest_id ?? ""),
     search_type: (dest.search_type ?? "CITY").toUpperCase(),
-    arrival_date: arrival,
-    departure_date: departure,
-    adults: "2",
+    arrival_date: opts.arrival_date,
+    departure_date: opts.departure_date,
+    adults: String(opts.adults),
     room_qty: "1",
     page_number: "1",
     units: "metric",
@@ -87,12 +71,15 @@ async function searchHotels(
     languagecode: "en-us",
     currency_code: "USD",
   });
-  if (maxPrice && maxPrice > 0) params.set("price_max", String(maxPrice));
+  if (opts.maxPrice && opts.maxPrice > 0) {
+    params.set("price_max", String(opts.maxPrice));
+  }
 
   const url = `${BASE}/hotels/searchHotels?${params}`;
   const res = await fetch(url, {
     headers: buildHeaders(),
-    next: { revalidate: 3600 },
+    // Don't cache — prices are date/guest-sensitive
+    cache: "no-store",
   });
   if (!res.ok) {
     console.warn(`[hotel-api] searchHotels failed: ${res.status}`);
@@ -108,13 +95,17 @@ function normalizeHotel(raw: RawHotel, city: string): Hotel | null {
   const price = p.priceBreakdown?.grossPrice?.value;
   if (!name || !price) return null;
 
-  // Booking review score is 0-10 → convert to 5-star scale
+  // Booking review score is 0–10 → convert to 5-star scale
   const rating =
     typeof p.reviewScore === "number"
       ? Math.max(1, Math.min(5, Math.round((p.reviewScore / 2) * 10) / 10))
       : 4;
 
-  const slug = name.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "");
+  const slug = name
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-z0-9-]/g, "");
+
   const booking_url =
     raw.hotel_id && p.countryCode
       ? `https://www.booking.com/hotel/${p.countryCode}/${slug}.html`
@@ -128,27 +119,47 @@ function normalizeHotel(raw: RawHotel, city: string): Hotel | null {
     hotel_id: raw.hotel_id,
     booking_query: `${name} ${city}`,
     booking_url,
-    image_url: Array.isArray(p.photoUrls) && p.photoUrls.length > 0 ? p.photoUrls[0] : undefined,
+    image_url:
+      Array.isArray(p.photoUrls) && p.photoUrls.length > 0
+        ? p.photoUrls[0]
+        : undefined,
     source: "booking",
   };
 }
 
+export interface HotelSearchOpts {
+  arrival_date: string;
+  departure_date: string;
+  adults: number;
+  maxPrice?: number;
+  count?: number;
+}
+
 /**
- * Fetch real hotels from Booking.com (via RapidAPI) for a given city.
- * Returns an empty array on any failure — caller should fall back to AI data.
+ * Fetch real hotels from Booking.com (via RapidAPI).
+ * Uses the exact dates and guest count from the user's search.
+ * Returns an empty array on any failure — caller falls back to AI data.
  */
 export async function getRealHotels(
   city: string,
-  opts: { days: number; maxPrice?: number; count?: number }
+  opts: HotelSearchOpts
 ): Promise<Hotel[]> {
   try {
     const dest = await searchDestination(city);
     if (!dest) return [];
-    const raws = await searchHotels(dest, opts.days, opts.maxPrice);
+
+    const raws = await searchHotels(dest, {
+      arrival_date: opts.arrival_date,
+      departure_date: opts.departure_date,
+      maxPrice: opts.maxPrice,
+      adults: opts.adults,
+    });
+
     const hotels = raws
       .map((r) => normalizeHotel(r, city))
       .filter((h): h is Hotel => h !== null);
-    // Dedupe by hotel_id (fallback to name) so we never return the same place twice.
+
+    // Dedupe by hotel_id → never return the same hotel twice
     const seen = new Set<string>();
     const unique = hotels.filter((h) => {
       const key = String(h.hotel_id ?? h.name);
@@ -156,6 +167,7 @@ export async function getRealHotels(
       seen.add(key);
       return true;
     });
+
     return unique.slice(0, opts.count ?? 1);
   } catch (err) {
     console.warn("[hotel-api] getRealHotels error:", err);

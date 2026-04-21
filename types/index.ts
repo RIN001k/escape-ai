@@ -39,6 +39,10 @@ export interface GenerateRequest {
   days: number;
   accommodation_budget: number;
   activity_budget: number;
+  check_in: string;        // YYYY-MM-DD
+  check_out: string;       // YYYY-MM-DD
+  guests: number;
+  departure_city?: string;
 }
 
 export interface GenerateResponse {

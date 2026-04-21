@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useState, useEffect, type FormEvent } from "react";
 import {
   Calendar,
   BedDouble,
@@ -10,28 +10,86 @@ import {
   Compass,
   ArrowRight,
   AlertCircle,
+  Users,
+  MapPin,
 } from "lucide-react";
 import { TripCard } from "@/components/TripCard";
 import { CityAutocomplete } from "@/components/CityAutocomplete";
 import type { GenerateRequest, Trip } from "@/types";
 import { cn } from "@/lib/utils";
 
+// ── Date helpers ────────────────────────────────────────────────────────────
+function toDateStr(d: Date): string {
+  return d.toISOString().slice(0, 10);
+}
+function addDays(d: Date, n: number): Date {
+  const r = new Date(d);
+  r.setDate(r.getDate() + n);
+  return r;
+}
+function nextFriday(): Date {
+  const d = new Date();
+  const delta = ((5 - d.getDay() + 7) % 7) || 7;
+  return addDays(d, delta);
+}
+function computeDays(start: string, end: string): number {
+  return Math.max(
+    1,
+    Math.round((new Date(end).getTime() - new Date(start).getTime()) / 86_400_000)
+  );
+}
+// ────────────────────────────────────────────────────────────────────────────
+
+const defaultCheckIn  = toDateStr(nextFriday());
+const defaultCheckOut = toDateStr(addDays(nextFriday(), 2));
+
 export default function HomePage() {
   const [form, setForm] = useState<GenerateRequest>({
     city: "",
-    days: 3,
+    days: 2,
     accommodation_budget: 250,
     activity_budget: 400,
+    check_in: defaultCheckIn,
+    check_out: defaultCheckOut,
+    guests: 2,
+    departure_city: "",
   });
 
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [trips, setTrips] = useState<Trip[] | null>(null);
+  const [loading, setLoading]           = useState(false);
+  const [error, setError]               = useState<string | null>(null);
+  const [trips, setTrips]               = useState<Trip[] | null>(null);
+  const [geoLoading, setGeoLoading]     = useState(false);
+  const [departureCity, setDepartureCity] = useState("");
+
+  // ── Auto-detect user's city via IP on mount ──────────────────────────────
+  useEffect(() => {
+    setGeoLoading(true);
+    fetch("https://ip-api.com/json/?fields=city,country")
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.city) {
+          setDepartureCity(d.city);
+          setForm((prev) => ({ ...prev, departure_city: d.city }));
+        }
+      })
+      .catch(() => {})
+      .finally(() => setGeoLoading(false));
+  }, []);
+
+  // ── Sync days when dates change ───────────────────────────────────────────
+  function handleCheckIn(value: string) {
+    const out = value >= form.check_out ? toDateStr(addDays(new Date(value), 1)) : form.check_out;
+    setForm((prev) => ({ ...prev, check_in: value, check_out: out, days: computeDays(value, out) }));
+  }
+  function handleCheckOut(value: string) {
+    if (value <= form.check_in) return; // don't allow invalid range
+    setForm((prev) => ({ ...prev, check_out: value, days: computeDays(prev.check_in, value) }));
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!form.city.trim()) {
-      setError("Please enter your starting city.");
+      setError("Please enter your destination city.");
       return;
     }
 
@@ -40,25 +98,17 @@ export default function HomePage() {
     setTrips(null);
 
     try {
+      const payload: GenerateRequest = { ...form, departure_city: departureCity };
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
-
       const data = await res.json();
-
-      if (!res.ok) {
-        throw new Error(data.error ?? "Something went wrong.");
-      }
-
+      if (!res.ok) throw new Error(data.error ?? "Something went wrong.");
       setTrips(data.trips);
-
-      // Smoothly scroll to results after they render
       setTimeout(() => {
-        document
-          .getElementById("results")
-          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+        document.getElementById("results")?.scrollIntoView({ behavior: "smooth", block: "start" });
       }, 120);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate trips.");
@@ -87,7 +137,7 @@ export default function HomePage() {
 
       {/* HERO */}
       <section className="relative min-h-screen flex flex-col items-center justify-center px-6 py-24">
-        <div className="max-w-4xl w-full text-center animate-fade-up">
+        <div className="max-w-5xl w-full text-center animate-fade-up">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full glass mb-8 text-xs text-white/70">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             AI-curated · 3 unique itineraries in seconds
@@ -100,42 +150,61 @@ export default function HomePage() {
           </h1>
 
           <p className="text-lg md:text-xl text-white/60 max-w-2xl mx-auto leading-relaxed mb-14">
-            Tell us where you are and how much you want to spend.
-            We&apos;ll design three unforgettable escapes — with hotels, activities, and vibe.
+            Tell us where you want to go and when.
+            We&apos;ll design three unforgettable escapes — with real hotels, activities, and live prices.
           </p>
 
           {/* GLASSMORPHISM FORM */}
           <form
             onSubmit={handleSubmit}
-            className="glass rounded-[28px] p-2 shadow-glass max-w-3xl mx-auto"
+            className="glass rounded-[28px] p-2 shadow-glass max-w-5xl mx-auto"
           >
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-2">
+            {/* Row 1: Destination · Check-in · Check-out · Guests */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2">
+              {/* Destination — auto-complete */}
               <CityAutocomplete
                 value={form.city}
                 onChange={(city) => setForm((prev) => ({ ...prev, city }))}
               />
 
-              <FormField
-                icon={<Calendar className="w-4 h-4" />}
-                label="Days"
-              >
+              <FormField icon={<Calendar className="w-4 h-4" />} label="Check-in">
+                <input
+                  type="date"
+                  value={form.check_in}
+                  min={toDateStr(new Date())}
+                  onChange={(e) => handleCheckIn(e.target.value)}
+                  className="w-full bg-transparent text-white text-sm font-medium focus:outline-none [color-scheme:dark]"
+                />
+              </FormField>
+
+              <FormField icon={<Calendar className="w-4 h-4" />} label="Check-out">
+                <input
+                  type="date"
+                  value={form.check_out}
+                  min={toDateStr(addDays(new Date(form.check_in), 1))}
+                  onChange={(e) => handleCheckOut(e.target.value)}
+                  className="w-full bg-transparent text-white text-sm font-medium focus:outline-none [color-scheme:dark]"
+                />
+              </FormField>
+
+              <FormField icon={<Users className="w-4 h-4" />} label="Guests">
                 <select
-                  value={form.days}
-                  onChange={(e) => setForm({ ...form, days: Number(e.target.value) })}
+                  value={form.guests}
+                  onChange={(e) => setForm((prev) => ({ ...prev, guests: Number(e.target.value) }))}
                   className="w-full bg-transparent text-white text-sm font-medium focus:outline-none appearance-none cursor-pointer"
                 >
-                  {[2, 3, 4, 5].map((d) => (
-                    <option key={d} value={d} className="bg-stone-900">
-                      {d} days
+                  {[1, 2, 3, 4, 5, 6].map((n) => (
+                    <option key={n} value={n} className="bg-stone-900">
+                      {n} {n === 1 ? "adult" : "adults"}
                     </option>
                   ))}
                 </select>
               </FormField>
+            </div>
 
-              <FormField
-                icon={<BedDouble className="w-4 h-4" />}
-                label="Hotel / night"
-              >
+            {/* Row 2: Budgets · Departure city (auto-detected) */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2">
+              <FormField icon={<BedDouble className="w-4 h-4" />} label="Hotel / night">
                 <div className="flex items-center w-full">
                   <span className="text-white/50 text-sm mr-1">$</span>
                   <input
@@ -144,17 +213,14 @@ export default function HomePage() {
                     step={25}
                     value={form.accommodation_budget}
                     onChange={(e) =>
-                      setForm({ ...form, accommodation_budget: Number(e.target.value) })
+                      setForm((prev) => ({ ...prev, accommodation_budget: Number(e.target.value) }))
                     }
                     className="w-full bg-transparent text-white text-sm font-medium focus:outline-none"
                   />
                 </div>
               </FormField>
 
-              <FormField
-                icon={<Ticket className="w-4 h-4" />}
-                label="Activities"
-              >
+              <FormField icon={<Ticket className="w-4 h-4" />} label="Activities budget">
                 <div className="flex items-center w-full">
                   <span className="text-white/50 text-sm mr-1">$</span>
                   <input
@@ -163,14 +229,36 @@ export default function HomePage() {
                     step={50}
                     value={form.activity_budget}
                     onChange={(e) =>
-                      setForm({ ...form, activity_budget: Number(e.target.value) })
+                      setForm((prev) => ({ ...prev, activity_budget: Number(e.target.value) }))
                     }
                     className="w-full bg-transparent text-white text-sm font-medium focus:outline-none"
                   />
                 </div>
               </FormField>
+
+              {/* Departure city — auto-filled by IP, user can edit */}
+              <FormField
+                icon={
+                  geoLoading
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <MapPin className="w-4 h-4" />
+                }
+                label="Flying from"
+              >
+                <input
+                  type="text"
+                  placeholder="Auto-detected…"
+                  value={departureCity}
+                  onChange={(e) => {
+                    setDepartureCity(e.target.value);
+                    setForm((prev) => ({ ...prev, departure_city: e.target.value }));
+                  }}
+                  className="w-full bg-transparent text-white placeholder:text-white/30 text-sm font-medium focus:outline-none"
+                />
+              </FormField>
             </div>
 
+            {/* Submit */}
             <button
               type="submit"
               disabled={loading}
@@ -178,10 +266,8 @@ export default function HomePage() {
                 "group relative mt-2 w-full flex items-center justify-center gap-2",
                 "py-4 rounded-2xl text-stone-950 font-semibold text-sm",
                 "bg-gradient-to-r from-sand-300 via-sand-400 to-sand-300",
-                "bg-[length:200%_100%] hover:bg-[length:200%_100%]",
                 "transition-all duration-300 hover:shadow-glow active:scale-[0.99]",
-                "disabled:opacity-70 disabled:cursor-not-allowed",
-                !loading && "hover:animate-shimmer"
+                "disabled:opacity-70 disabled:cursor-not-allowed"
               )}
             >
               {loading ? (
@@ -206,20 +292,17 @@ export default function HomePage() {
             </div>
           )}
 
-          {/* Trust row */}
           <div className="mt-14 flex flex-wrap items-center justify-center gap-x-8 gap-y-3 text-xs text-white/40">
-            <span className="flex items-center gap-1.5">
-              <span className="w-1 h-1 rounded-full bg-white/40" />
-              Real bookable hotels
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-1 h-1 rounded-full bg-white/40" />
-              Budget-aware
-            </span>
-            <span className="flex items-center gap-1.5">
-              <span className="w-1 h-1 rounded-full bg-white/40" />
-              No sign-up
-            </span>
+            {[
+              "Real bookable hotels",
+              "Live prices for your dates",
+              "No sign-up",
+            ].map((t) => (
+              <span key={t} className="flex items-center gap-1.5">
+                <span className="w-1 h-1 rounded-full bg-white/40" />
+                {t}
+              </span>
+            ))}
           </div>
         </div>
       </section>
@@ -237,7 +320,12 @@ export default function HomePage() {
               </h2>
               {!loading && trips && (
                 <p className="mt-4 text-white/50 max-w-xl mx-auto">
-                  Each option offers a unique personality. Pick the one that calls to you.
+                  Prices are live for{" "}
+                  <span className="text-white/80">
+                    {form.check_in} → {form.check_out}
+                  </span>
+                  {" · "}
+                  <span className="text-white/80">{form.guests} {form.guests === 1 ? "adult" : "adults"}</span>
                 </p>
               )}
             </div>
@@ -249,12 +337,16 @@ export default function HomePage() {
                     <div
                       key={trip.id}
                       className="animate-fade-up opacity-0"
-                      style={{
-                        animationDelay: `${i * 120}ms`,
-                        animationFillMode: "forwards",
-                      }}
+                      style={{ animationDelay: `${i * 120}ms`, animationFillMode: "forwards" }}
                     >
-                      <TripCard trip={trip} index={i} />
+                      <TripCard
+                        trip={trip}
+                        index={i}
+                        checkIn={form.check_in}
+                        checkOut={form.check_out}
+                        guests={form.guests}
+                        departureCity={departureCity}
+                      />
                     </div>
                   ))}
             </div>
@@ -264,15 +356,13 @@ export default function HomePage() {
 
       {/* FOOTER */}
       <footer className="relative px-6 py-10 text-center text-xs text-white/30 border-t border-white/5">
-        <p>
-          Weekend Escape AI — designed for wanderers. Prices and availability are AI-estimated.
-        </p>
+        <p>Weekend Escape AI — designed for wanderers. Prices are live estimates for selected dates.</p>
       </footer>
     </main>
   );
 }
 
-// ----- Small presentational helpers, kept local -----
+// ── Local helpers ────────────────────────────────────────────────────────────
 
 function FormField({
   icon,
@@ -284,7 +374,7 @@ function FormField({
   children: React.ReactNode;
 }) {
   return (
-    <label className="group flex flex-col gap-1 text-left bg-white/5 hover:bg-white/8 transition-colors rounded-2xl px-4 py-3 cursor-text border border-transparent hover:border-white/10 focus-within:border-sand-400/40 focus-within:bg-white/8">
+    <label className="group flex flex-col gap-1 text-left bg-white/5 hover:bg-white/[0.08] transition-colors rounded-2xl px-4 py-3 cursor-text border border-transparent hover:border-white/10 focus-within:border-sand-400/40 focus-within:bg-white/[0.08]">
       <div className="flex items-center gap-1.5 text-[11px] uppercase tracking-wider font-semibold text-white/50">
         <span className="text-sand-400">{icon}</span>
         {label}

@@ -66,9 +66,20 @@ function StarRating({ rating }: { rating: number }) {
 interface TripCardProps {
   trip: Trip;
   index: number;
+  checkIn?: string;
+  checkOut?: string;
+  guests?: number;
+  departureCity?: string;
 }
 
-export function TripCard({ trip, index }: TripCardProps) {
+export function TripCard({
+  trip,
+  index,
+  checkIn,
+  checkOut,
+  guests = 2,
+  departureCity,
+}: TripCardProps) {
   const [activitiesOpen, setActivitiesOpen] = useState(false);
   const [imgFailed, setImgFailed] = useState(false);
 
@@ -77,11 +88,34 @@ export function TripCard({ trip, index }: TripCardProps) {
     "from-white/10 to-white/5 border-white/20 text-white/70";
 
   const imgSrc = buildImageUrl(trip);
-  const bookingUrl = buildBookingUrl(trip);
-  const flightsUrl = `https://www.google.com/travel/flights?q=Flights%20to%20${encodeURIComponent(
-    trip.city
-  )}`;
   const isLiveHotel = trip.hotel.source === "booking";
+
+  // Booking.com — include real dates and guest count when available
+  const bookingUrl = (() => {
+    if (trip.hotel.booking_url && checkIn && checkOut) {
+      const u = new URL(trip.hotel.booking_url);
+      u.searchParams.set("checkin", checkIn);
+      u.searchParams.set("checkout", checkOut);
+      u.searchParams.set("group_adults", String(guests));
+      return u.toString();
+    }
+    const base = buildBookingUrl(trip);
+    const u = new URL(base);
+    if (checkIn) u.searchParams.set("checkin", checkIn);
+    if (checkOut) u.searchParams.set("checkout", checkOut);
+    u.searchParams.set("group_adults", String(guests));
+    return u.toString();
+  })();
+
+  // Google Flights — from departure city to destination with dates
+  const flightsUrl = (() => {
+    const from = departureCity ? encodeURIComponent(departureCity) : "";
+    const to = encodeURIComponent(trip.city);
+    if (from && checkIn) {
+      return `https://www.google.com/travel/flights?q=Flights+from+${from}+to+${to}+on+${checkIn}${checkOut ? `+returning+${checkOut}` : ""}`;
+    }
+    return `https://www.google.com/travel/flights?q=Flights+to+${to}`;
+  })();
 
   return (
     <article
