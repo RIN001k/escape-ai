@@ -1,26 +1,28 @@
 import { GoogleGenerativeAI, type GenerativeModel } from "@google/generative-ai";
 
-if (!process.env.GEMINI_API_KEY) {
-  throw new Error("Missing GEMINI_API_KEY environment variable");
-}
-
-export const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
 const generationConfig = {
   responseMimeType: "application/json",
   temperature: 1.0,
   topP: 0.95,
 };
 
-// Ordered by preference. If the primary is overloaded (503), we fall back.
 const MODEL_CASCADE = [
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-flash-latest",
 ] as const;
 
+let cachedClient: GoogleGenerativeAI | null = null;
+
+function getClient(): GoogleGenerativeAI {
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("Missing GEMINI_API_KEY environment variable");
+  if (!cachedClient) cachedClient = new GoogleGenerativeAI(key);
+  return cachedClient;
+}
+
 function getModel(name: string): GenerativeModel {
-  return genAI.getGenerativeModel({ model: name, generationConfig });
+  return getClient().getGenerativeModel({ model: name, generationConfig });
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -28,7 +30,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /**
  * Generate content with retry + model fallback.
  * - Retries transient errors (503/429/500) with exponential backoff.
- * - Falls back to the next model in the cascade if the current one stays overloaded.
+ * - Falls back to the next model in the cascade if the current stays overloaded.
+ * - The API key is read lazily at call time (NOT at module load), so this file
+ *   is safe to import during Next.js build-time page-data collection.
  */
 export async function generateJSON(prompt: string): Promise<string> {
   let lastError: unknown;
@@ -47,11 +51,9 @@ export async function generateJSON(prompt: string): Promise<string> {
 
         if (!isTransient) throw err;
 
-        // Exponential backoff: 600ms, 1.4s, 3s
         await sleep(600 * Math.pow(2.2, attempt));
       }
     }
-    // Exhausted retries on this model — try the next one in the cascade
   }
 
   throw lastError instanceof Error

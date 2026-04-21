@@ -8,6 +8,9 @@ import {
 } from "@/lib/city-image";
 import type { GenerateRequest, Hotel, Trip } from "@/types";
 
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+
 function buildPrompt(req: GenerateRequest): string {
   const city = req.city.trim();
   return `You are a world-class luxury travel agent curating weekend getaways.
