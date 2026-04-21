@@ -19,14 +19,10 @@ import type { Trip } from "@/types";
 import { cn } from "@/lib/utils";
 
 function buildImageUrl(trip: Trip): string | null {
-  // Priority: real hotel photo → server-resolved image → Wikipedia city photo.
-  // No placeholder URL fallback — if none exist, return null so the UI can render a gradient.
-  return (
-    trip.hotel.image_url ??
-    trip.image_url ??
-    trip.city_image_url ??
-    null
-  );
+  // Hero must always be a CITY photo (never a hotel room).
+  // The server populates image_url with a real city/landmark photo from
+  // Wikimedia Commons. city_image_url is a shared fallback.
+  return trip.image_url ?? trip.city_image_url ?? null;
 }
 
 function buildBookingUrl(trip: Trip): string {
@@ -151,15 +147,6 @@ export function TripCard({ trip, index }: TripCardProps) {
         {/* Hotel */}
         <div className="rounded-2xl bg-white/5 border border-white/10 p-4 space-y-2">
           <div className="flex items-start justify-between gap-3">
-            {trip.hotel.image_url && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={trip.hotel.image_url}
-                alt={trip.hotel.name}
-                className="w-14 h-14 rounded-xl object-cover flex-shrink-0 border border-white/10"
-                loading="lazy"
-              />
-            )}
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2 mb-1">
                 <Hotel className="w-4 h-4 text-sand-400 flex-shrink-0" />

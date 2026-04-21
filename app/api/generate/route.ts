@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { generateJSON } from "@/lib/gemini";
 import { getRealHotels } from "@/lib/hotel-api";
-import { getCityImage, getImageCandidates } from "@/lib/city-image";
+import {
+  getCityImage,
+  getCommonsCityImages,
+  pickDistinct,
+} from "@/lib/city-image";
 import type { GenerateRequest, Hotel, Trip } from "@/types";
 
 function buildPrompt(req: GenerateRequest): string {
@@ -19,7 +23,7 @@ CRITICAL: All 3 trip options MUST take place in "${city}". Do NOT suggest any ot
 The 3 options must differ in:
 - VIBE (each a different one from: Romantic, Adventure, Cultural, Wellness, Foodie)
 - NEIGHBORHOOD / DISTRICT of ${city}
-- An ICONIC LANDMARK OR SCENE in ${city} that matches the vibe — used for the image (e.g., "${city} old town square", "${city} riverfront at sunset", "${city} cathedral interior"). Each image_query MUST reference a DIFFERENT landmark or scene of ${city} so the 3 photos look different.
+- The activities and hotel chosen
 
 Return a valid JSON array of 3 trip objects. Strict schema:
 {
@@ -29,7 +33,6 @@ Return a valid JSON array of 3 trip objects. Strict schema:
   city: string,                      // "${city}"
   country: string,
   description: string,               // 2 poetic sentences
-  image_query: string,               // must include "${city}" + a distinct landmark keyword
   vibe: "Romantic" | "Adventure" | "Cultural" | "Wellness" | "Foodie",
   activities: [
     { title: string, description: string, duration: string, price_estimate: string }
@@ -48,23 +51,7 @@ Return a valid JSON array of 3 trip objects. Strict schema:
 Rules:
 - Every trip is IN ${city}.
 - Hotel price_per_night MUST be <= ${req.accommodation_budget}.
-- The 3 image_query values must reference 3 DIFFERENT landmarks/scenes of ${city}.
 - Return ONLY the raw JSON array. No markdown.`;
-}
-
-async function resolveUniqueHeroImage(
-  trip: Trip,
-  used: Set<string>
-): Promise<string | null> {
-  const query = trip.image_query?.trim() || `${trip.city} landmark`;
-  const candidates = await getImageCandidates(query, 5);
-  for (const url of candidates) {
-    if (!used.has(url)) {
-      used.add(url);
-      return url;
-    }
-  }
-  return null;
 }
 
 export async function POST(request: NextRequest) {
@@ -93,40 +80,58 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "AI returned an unexpected response." }, { status: 500 });
     }
 
-    // 2. Fetch real hotels per city — one batched call, N hotels per city.
+    // 2. Group trips by city for batched hotel + image fetching.
+    const citiesInOrder: string[] = [];
+    const cityToTripIdx = new Map<string, number[]>();
+    trips.forEach((t, idx) => {
+      const key = t.city.toLowerCase();
+      if (!cityToTripIdx.has(key)) {
+        citiesInOrder.push(t.city);
+        cityToTripIdx.set(key, []);
+      }
+      cityToTripIdx.get(key)!.push(idx);
+    });
+
+    // 3. For each unique city, fetch BOTH:
+    //    - real hotels from Booking (optional, requires RapidAPI key)
+    //    - a pool of photos from Wikimedia Commons (always, free)
     const hasRapidKey = Boolean(process.env.RAPIDAPI_KEY);
     const hotelsByCity = new Map<string, Hotel[]>();
+    const heroByTripIdx = new Map<number, string>();
 
-    if (hasRapidKey) {
-      const cityCounts = new Map<string, { city: string; count: number }>();
-      for (const trip of trips) {
-        const key = trip.city.toLowerCase();
-        const entry = cityCounts.get(key) ?? { city: trip.city, count: 0 };
-        entry.count += 1;
-        cityCounts.set(key, entry);
-      }
-      await Promise.all(
-        [...cityCounts.entries()].map(async ([key, { city, count }]) => {
-          const hotels = await getRealHotels(city, {
-            days: body.days,
-            maxPrice: body.accommodation_budget,
-            count,
-          });
-          hotelsByCity.set(key, hotels);
-        })
-      );
-    }
+    await Promise.all(
+      citiesInOrder.map(async (city) => {
+        const key = city.toLowerCase();
+        const tripIndices = cityToTripIdx.get(key)!;
+        const count = tripIndices.length;
 
-    // 3. Resolve unique hero images (one Wikipedia search per trip, deduped).
-    const usedImages = new Set<string>();
-    const heroImages = await Promise.all(
-      trips.map((t) => resolveUniqueHeroImage(t, usedImages))
+        const [hotels, commonsPool] = await Promise.all([
+          hasRapidKey
+            ? getRealHotels(city, {
+                days: body.days,
+                maxPrice: body.accommodation_budget,
+                count,
+              })
+            : Promise.resolve([] as Hotel[]),
+          getCommonsCityImages(city),
+        ]);
+
+        hotelsByCity.set(key, hotels);
+
+        // Pick N distinct images for this city and assign one to each trip.
+        const picks = pickDistinct(commonsPool, count);
+        tripIndices.forEach((tripIdx, i) => {
+          if (picks[i]) heroByTripIdx.set(tripIdx, picks[i]);
+        });
+      })
     );
 
-    // 4. Fallback shared city photo for any trip that didn't get a unique hero.
+    // 4. Shared city summary photo as a last-resort fallback.
     const cityFallback = await getCityImage(trips[0].city, trips[0].country);
 
-    // 5. Merge everything.
+    // 5. Merge everything into the final trip objects.
+    //    IMPORTANT: hero image is ALWAYS a city photo (Commons / Wikipedia).
+    //    Real hotel photos are preserved on `hotel.image_url` but NEVER used as hero.
     const enriched: Trip[] = trips.map((trip, i) => {
       const pool = hotelsByCity.get(trip.city.toLowerCase()) ?? [];
       const realHotel = pool.shift();
@@ -139,7 +144,7 @@ export async function POST(request: NextRequest) {
           }
         : { ...trip.hotel, source: "ai" as const };
 
-      const hero = heroImages[i] ?? cityFallback ?? undefined;
+      const hero = heroByTripIdx.get(i) ?? cityFallback ?? undefined;
 
       return {
         ...trip,
