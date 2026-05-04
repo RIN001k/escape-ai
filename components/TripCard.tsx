@@ -27,13 +27,8 @@ function buildImageUrl(trip: Trip): string | null {
 
 function buildBookingUrl(trip: Trip): string {
   if (trip.hotel.booking_url) return trip.hotel.booking_url;
-  // AI hotels are fictional — search the city so user sees actually available hotels.
-  // For real Booking hotels without a direct URL, also search city to avoid landing
-  // on a hotel page that shows "unavailable for these dates".
-  const query = trip.hotel.source === "ai"
-    ? trip.city
-    : (trip.hotel.booking_query || trip.city);
-  return `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
+  // Always search by city — guarantees user lands on a page with available hotels.
+  return `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(trip.city)}`;
 }
 
 const VIBE_COLORS: Record<string, string> = {

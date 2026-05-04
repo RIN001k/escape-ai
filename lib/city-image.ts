@@ -1,3 +1,7 @@
+interface UnsplashPhoto {
+  urls?: { regular?: string; full?: string };
+}
+
 interface WikiSummary {
   type?: string;
   originalimage?: { source?: string };
@@ -19,11 +23,43 @@ interface CommonsResponse {
   query?: { pages?: Record<string, CommonsPage> };
 }
 
-/** Main city photo from Wikipedia (summary endpoint). Shared fallback. */
+/** Fetch beautiful city photos from Unsplash (primary source). */
+async function getUnsplashImages(city: string, count: number): Promise<string[]> {
+  const key = process.env.UNSPLASH_ACCESS_KEY;
+  if (!key) return [];
+
+  const params = new URLSearchParams({
+    query: `${city} city travel`,
+    per_page: String(Math.min(count + 5, 20)),
+    orientation: "landscape",
+    content_filter: "high",
+  });
+
+  try {
+    const res = await fetch(`https://api.unsplash.com/search/photos?${params}`, {
+      headers: { Authorization: `Client-ID ${key}` },
+      next: { revalidate: 86400 },
+    });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { results?: UnsplashPhoto[] };
+    return (data.results ?? [])
+      .map((p) => p.urls?.regular ?? p.urls?.full ?? null)
+      .filter((u): u is string => Boolean(u));
+  } catch {
+    return [];
+  }
+}
+
+/** Main city photo from Wikipedia (fallback). */
 export async function getCityImage(
   city: string,
   country?: string
 ): Promise<string | null> {
+  // Try Unsplash first
+  const unsplash = await getUnsplashImages(city, 1);
+  if (unsplash.length > 0) return unsplash[0];
+
+  // Fallback to Wikipedia
   const candidates = [
     city,
     country ? `${city}, ${country}` : null,
@@ -52,12 +88,15 @@ export async function getCityImage(
 }
 
 /**
- * Fetch a pool of real photos for a city from Wikimedia Commons.
- * Commons has a dedicated `Category:{City}` with dozens to thousands of images,
- * all guaranteed to be about that city. We filter out non-photos (svg, tiff, etc.).
+ * Fetch a pool of beautiful city photos.
+ * Uses Unsplash when key is available, falls back to Wikimedia Commons.
  */
 export async function getCommonsCityImages(city: string): Promise<string[]> {
-  // Try a few likely category titles
+  // Try Unsplash first
+  const unsplash = await getUnsplashImages(city, 15);
+  if (unsplash.length > 0) return unsplash;
+
+  // Fallback: Wikimedia Commons
   const categoryCandidates = [city, `${city} (city)`];
 
   for (const cat of categoryCandidates) {
@@ -86,7 +125,6 @@ export async function getCommonsCityImages(city: string): Promise<string[]> {
           const info = p.imageinfo?.[0];
           if (!info) return null;
           const mime = info.mime ?? "";
-          // Keep only real photos (jpeg/png/webp)
           if (!/^image\/(jpeg|png|webp)$/i.test(mime)) return null;
           return info.thumburl ?? info.url ?? null;
         })
