@@ -27,7 +27,12 @@ function buildImageUrl(trip: Trip): string | null {
 
 function buildBookingUrl(trip: Trip): string {
   if (trip.hotel.booking_url) return trip.hotel.booking_url;
-  const query = trip.hotel.booking_query || `${trip.hotel.name} ${trip.city}`;
+  // AI hotels are fictional — search the city so user sees actually available hotels.
+  // For real Booking hotels without a direct URL, also search city to avoid landing
+  // on a hotel page that shows "unavailable for these dates".
+  const query = trip.hotel.source === "ai"
+    ? trip.city
+    : (trip.hotel.booking_query || trip.city);
   return `https://www.booking.com/searchresults.html?ss=${encodeURIComponent(query)}`;
 }
 
