@@ -47,11 +47,13 @@ interface RawProperty {
   priceBreakdown?: RawPriceBreakdown;
   photoUrls?: string[];
   countryCode?: string;
+  url?: string;
 }
 
 interface RawHotel {
   hotel_id?: number | string;
   property?: RawProperty;
+  url?: string;
 }
 
 async function searchHotels(
@@ -101,15 +103,9 @@ function normalizeHotel(raw: RawHotel, city: string): Hotel | null {
       ? Math.max(1, Math.min(5, Math.round((p.reviewScore / 2) * 10) / 10))
       : 4;
 
-  const slug = name
-    .toLowerCase()
-    .replace(/\s+/g, "-")
-    .replace(/[^a-z0-9-]/g, "");
-
-  const booking_url =
-    raw.hotel_id && p.countryCode
-      ? `https://www.booking.com/hotel/${p.countryCode}/${slug}.html`
-      : undefined;
+  // Prefer a URL returned directly by the API; slug-based construction is
+  // unreliable because Booking.com's internal slugs differ from the hotel name.
+  const booking_url = raw.property?.url ?? raw.url ?? undefined;
 
   return {
     name,
